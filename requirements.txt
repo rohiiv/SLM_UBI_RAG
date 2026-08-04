@@ -1,0 +1,26 @@
+# Union Bank of India - Banking RAG System Requirements
+
+# Core System & Configuration
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+
+# Document Loaders & Extractors
+pypdf>=4.0.0
+pdfplumber>=0.10.0
+python-docx>=1.0.0
+
+# Text Embeddings & Reranking
+sentence-transformers>=2.5.0
+FlagEmbedding>=1.2.0
+numpy>=1.24.0
+
+# Vector Database
+qdrant-client>=1.8.0
+
+# Fine-Tuned SLM & Transformers Inference
+transformers>=4.40.0
+torch>=2.2.0
+accelerate>=0.28.0
+
+# Testing Framework
+pytest>=8.0.0
