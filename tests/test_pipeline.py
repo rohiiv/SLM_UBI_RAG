@@ -12,6 +12,9 @@ from banking_rag.pipeline.rag_pipeline import OnlineRAGPipeline, RAGResponse
 def test_offline_ingestion_and_online_rag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """End-to-end test verifying document ingestion and subsequent query execution."""
     monkeypatch.setenv("INGESTION_ENFORCE_ALLOWLIST", "false")
+    # Use embedded Qdrant so this test runs without a Docker server
+    monkeypatch.setenv("VECTOR_DB_MODE", "embedded")
+    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant_data"))
     # 1. Create a dummy banking text file
     sample_file = tmp_path / "RBI_KYC_Directive.txt"
     sample_file.write_text(

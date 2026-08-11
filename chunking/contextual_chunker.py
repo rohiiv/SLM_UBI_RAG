@@ -35,9 +35,6 @@ class ContextualChunker:
         Returns:
             List of TextChunk instances with prepended context headers.
         """
-        raw_chunks = self.chunker.chunk_document(document)
-        contextual_chunks: List[TextChunk] = []
-
         # Extract document-level context header elements
         doc_name = document.metadata.get(MetadataKeys.DOC_NAME, "Document")
         regulator = document.metadata.get(MetadataKeys.REGULATOR, "")
@@ -54,6 +51,31 @@ class ContextualChunker:
             header_prefix_parts.append(f"Section: {section}")
 
         doc_header = " | ".join(header_prefix_parts)
+
+        # Handle pre-chunked documents (e.g., JSONL records) without re-splitting
+        if document.metadata.get("is_prechunked", False):
+            context_header = f"[Context: {doc_header}]\n"
+            contextual_content = context_header + document.content
+
+            chunk_metadata = dict(document.metadata)
+            chunk_metadata[MetadataKeys.CONTEXT_HEADER] = context_header.strip()
+            chunk_metadata[MetadataKeys.CHUNK_ID] = document.doc_id
+            chunk_metadata[MetadataKeys.PARENT_ID] = document.metadata.get("document_id", document.doc_id)
+            chunk_metadata["chunk_index"] = document.metadata.get("chunk_index", 1)
+            chunk_metadata["total_chunks"] = 1
+
+            chunk_obj = TextChunk(
+                chunk_id=document.doc_id,
+                content=contextual_content,
+                metadata=chunk_metadata,
+                parent_doc_id=document.metadata.get("document_id", document.doc_id),
+                start_char_idx=0,
+                end_char_idx=len(document.content),
+            )
+            return [chunk_obj]
+
+        raw_chunks = self.chunker.chunk_document(document)
+        contextual_chunks: List[TextChunk] = []
 
         for chunk in raw_chunks:
             # Build contextual block header

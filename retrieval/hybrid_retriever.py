@@ -60,8 +60,8 @@ class HybridRetriever(BaseRetriever):
         logger.info(f"Executing hybrid retrieval with RRF for query: '{query}'")
 
         try:
-            # 1. Fetch dense candidates
-            dense_results = self.dense_retriever.retrieve(query=query, top_k=k * 2, filters=filters)
+            # 1. Fetch dense candidates (using pre_rrf_k pool size)
+            dense_results = self.dense_retriever.retrieve(query=query, top_k=self.config.pre_rrf_k, filters=filters)
 
             # 2. Simulate/execute sparse BM25 candidates
             sparse_results = self._bm25_sparse_retrieve(query=query, dense_candidates=dense_results)

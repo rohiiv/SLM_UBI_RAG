@@ -22,5 +22,9 @@ transformers>=4.40.0
 torch>=2.2.0
 accelerate>=0.28.0
 
+# Web API Server
+fastapi>=0.100.0
+uvicorn>=0.20.0
+
 # Testing Framework
 pytest>=8.0.0

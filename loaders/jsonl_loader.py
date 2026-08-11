@@ -182,11 +182,12 @@ class JSONLLoader(BaseDocumentLoader):
             MetadataKeys.VERSION: record.get(MetadataKeys.VERSION, ""),
             "file_hash": file_hash,
             "jsonl_line": line_num,
+            "is_prechunked": True,
         }
 
-        # Include any extra non-standard metadata keys from record
+        # Include any extra non-standard metadata keys from record (including lists like keywords & entities)
         for k, v in record.items():
-            if k not in self.TEXT_KEYS and k not in metadata and isinstance(v, (str, int, float, bool)):
+            if k not in self.TEXT_KEYS and k not in metadata and isinstance(v, (str, int, float, bool, list)):
                 metadata[k] = v
 
         return metadata

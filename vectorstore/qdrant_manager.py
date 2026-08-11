@@ -53,7 +53,14 @@ class QdrantVectorStoreManager:
         if self._client is not None:
             return self._client
 
-        cache_key = (self.config.url, self.config.host, self.config.port, self.config.api_key)
+        cache_key = (
+            self.config.vector_db_mode,
+            self.config.qdrant_path,
+            self.config.url,
+            self.config.qdrant_host,
+            self.config.qdrant_port,
+            self.config.qdrant_api_key,
+        )
 
         with QdrantVectorStoreManager._cache_lock:
             cached = QdrantVectorStoreManager._client_cache.get(cache_key)
@@ -62,36 +69,48 @@ class QdrantVectorStoreManager:
                 logger.info("Reusing already-established Qdrant connection from shared cache.")
                 return self._client
 
-            if not self.config.api_key:
-                # AppConfig.__post_init__ already hard-fails outside dev environments; this
-                # is a second, local reminder for whoever is running the dev/local path so
-                # the gap doesn't get forgotten on the way to a real deployment.
-                logger.warning(
-                    "Connecting to Qdrant with NO API KEY configured. This is only acceptable "
-                    "for local development against a Qdrant instance that isn't reachable from "
-                    "outside this machine. Set QDRANT_API_KEY before pointing this at anything "
-                    "containing real banking/compliance data."
-                )
-
             try:
                 from qdrant_client import QdrantClient
-                if self.config.url:
-                    logger.info(f"Connecting to Qdrant Cloud/URL: {self.config.url}")
-                    client = QdrantClient(url=self.config.url, api_key=self.config.api_key)
+
+                if self.config.vector_db_mode == "embedded":
+                    logger.info("Using Qdrant backend: EMBEDDED")
+                    logger.info(f"Path: {self.config.qdrant_path}")
+                    client = QdrantClient(path=self.config.qdrant_path)
                     is_memory = False
-                elif self.config.host:
-                    logger.info(f"Connecting to Qdrant server at {self.config.host}:{self.config.port}")
-                    client = QdrantClient(host=self.config.host, port=self.config.port, api_key=self.config.api_key)
+                elif self.config.vector_db_mode == "server":
+                    logger.info("Using Qdrant backend: SERVER")
+                    if self.config.url:
+                        logger.info(f"Host: {self.config.url}")
+                        client = QdrantClient(
+                            url=self.config.url,
+                            api_key=self.config.qdrant_api_key,
+                            timeout=self.config.timeout,
+                        )
+                    else:
+                        logger.info(f"Host: {self.config.qdrant_host}:{self.config.qdrant_port}")
+                        if not self.config.qdrant_api_key:
+                            logger.warning(
+                                "Connecting to Qdrant with NO API KEY configured. This is only acceptable "
+                                "for local development against a Qdrant instance that isn't reachable from "
+                                "outside this machine. Set QDRANT_API_KEY before pointing this at anything "
+                                "containing real banking/compliance data."
+                            )
+                        client = QdrantClient(
+                            host=self.config.qdrant_host,
+                            port=self.config.qdrant_port,
+                            api_key=self.config.qdrant_api_key,
+                            timeout=self.config.timeout,
+                        )
                     is_memory = False
                 else:
-                    logger.info("Initializing in-memory Qdrant instance.")
-                    client = QdrantClient(location=":memory:")
-                    is_memory = True
+                    raise VectorDBError(f"VECTOR_DB_MODE must be either 'server' or 'embedded'.")
 
             except ImportError:
                 logger.warning("qdrant-client not installed. Falling back to local in-memory mock client.")
                 client = "MOCK"
                 is_memory = True
+            except VectorDBError:
+                raise
             except Exception as e:
                 logger.error(f"Failed to connect to Qdrant: {str(e)}")
                 raise VectorDBError(f"Qdrant connection failed: {str(e)}")
@@ -238,6 +257,7 @@ class QdrantVectorStoreManager:
                     query=query_vector,
                     limit=top_k,
                     query_filter=query_filter,
+                    timeout=int(self.config.timeout),
                 )
                 results = response.points
             else:
@@ -246,6 +266,7 @@ class QdrantVectorStoreManager:
                     query_vector=query_vector,
                     limit=top_k,
                     query_filter=query_filter,
+                    timeout=int(self.config.timeout),
                 )
 
             scored_chunks = []

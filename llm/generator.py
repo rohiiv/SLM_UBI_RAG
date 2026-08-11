@@ -94,14 +94,17 @@ class QwenBankingSLMGenerator(BaseLLMGenerator):
                 tokenizer = AutoTokenizer.from_pretrained(
                     self.model_name, trust_remote_code=True, revision=self.model_revision or None,
                 )
+                device_map = "auto" if self.device == "cuda" else None
                 model = AutoModelForCausalLM.from_pretrained(
                     self.model_name,
                     torch_dtype=torch.float16 if self.device != "cpu" else torch.float32,
-                    device_map="auto" if self.device != "cpu" else None,
+                    device_map=device_map,
                     trust_remote_code=True,
                     revision=self.model_revision or None,
                 )
-                logger.info("Successfully loaded fine-tuned Qwen Banking SLM model weights.")
+                if self.device != "cpu" and device_map is None:
+                    model = model.to(self.device)
+                logger.info(f"Successfully loaded fine-tuned Qwen Banking SLM model weights on {self.device}.")
 
             except ImportError:
                 logger.warning("transformers/torch not installed. Using mock LLM response generator.")

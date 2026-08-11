@@ -30,14 +30,63 @@ from banking_rag.constants import (
 @dataclass(frozen=True)
 class QdrantConfig:
     """Qdrant Vector Database Connection Settings."""
-    host: str = field(default_factory=lambda: os.getenv("QDRANT_HOST", "localhost"))
+    mode: str = field(default_factory=lambda: os.getenv("VECTOR_DB_MODE", "server").lower())
+    path: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_PATH", "./qdrant_data"))
+    host: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_HOST", "localhost") or None)
     port: int = field(default_factory=lambda: int(os.getenv("QDRANT_PORT", "6333")))
     grpc_port: int = field(default_factory=lambda: int(os.getenv("QDRANT_GRPC_PORT", "6334")))
     api_key: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_API_KEY", None) or None)
     url: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_URL", None))
     prefer_grpc: bool = field(default_factory=lambda: os.getenv("QDRANT_PREFER_GRPC", "false").lower() == "true")
-    collection_name: str = field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", DEFAULT_QDRANT_COLLECTION_NAME))
+    collection_name: str = field(default_factory=lambda: os.getenv("QDRANT_COLLECTION") or os.getenv("QDRANT_COLLECTION_NAME") or DEFAULT_QDRANT_COLLECTION_NAME)
     vector_size: int = field(default_factory=lambda: int(os.getenv("QDRANT_VECTOR_SIZE", str(DEFAULT_DENSE_VECTOR_DIM))))
+    timeout: float = field(default_factory=lambda: float(os.getenv("QDRANT_TIMEOUT", "60.0")))
+
+    @property
+    def vector_db_mode(self) -> str:
+        return self.mode
+
+    @property
+    def qdrant_path(self) -> Optional[str]:
+        return self.path
+
+    @property
+    def qdrant_host(self) -> Optional[str]:
+        return self.host
+
+    @property
+    def qdrant_port(self) -> int:
+        return self.port
+
+    @property
+    def qdrant_api_key(self) -> Optional[str]:
+        return self.api_key
+
+    def __post_init__(self) -> None:
+        from banking_rag.exceptions import ConfigurationError
+        mode_val = (self.mode or "").lower()
+        if mode_val not in ("server", "embedded"):
+            raise ConfigurationError("VECTOR_DB_MODE must be either 'server' or 'embedded'.")
+        if mode_val == "embedded":
+            if not self.path:
+                raise ConfigurationError("When VECTOR_DB_MODE=embedded, QDRANT_PATH is required.")
+        elif mode_val == "server":
+            if not self.host and not self.url:
+                raise ConfigurationError("When VECTOR_DB_MODE=server, QDRANT_HOST is required.")
+
+
+
+def _detect_device() -> str:
+    env_device = os.getenv("MODEL_DEVICE")
+    if env_device:
+        return env_device
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
 
 
 @dataclass(frozen=True)
@@ -46,7 +95,7 @@ class ModelConfig:
     embedding_model_name: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL_NAME", DEFAULT_EMBEDDING_MODEL))
     slm_model_name: str = field(default_factory=lambda: os.getenv("SLM_MODEL_NAME", DEFAULT_SLM_MODEL))
     reranker_model_name: str = field(default_factory=lambda: os.getenv("RERANKER_MODEL_NAME", DEFAULT_RERANKER_MODEL))
-    device: str = field(default_factory=lambda: os.getenv("MODEL_DEVICE", "cpu"))
+    device: str = field(default_factory=_detect_device)
     use_quantization: bool = field(default_factory=lambda: os.getenv("USE_QUANTIZATION", "false").lower() == "true")
     max_new_tokens: int = field(default_factory=lambda: int(os.getenv("MAX_NEW_TOKENS", "1024")))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.1")))
@@ -74,7 +123,10 @@ class RetrievalConfig:
     top_k_sparse: int = field(default_factory=lambda: int(os.getenv("TOP_K_SPARSE", str(DEFAULT_TOP_K_SPARSE))))
     top_k_reranked: int = field(default_factory=lambda: int(os.getenv("TOP_K_RERANKED", str(DEFAULT_TOP_K_RERANKED))))
     rrf_k: int = field(default_factory=lambda: int(os.getenv("RRF_K", "60")))
+    pre_rrf_k: int = field(default_factory=lambda: int(os.getenv("PRE_RRF_K", "150")))
     min_similarity_score: float = field(default_factory=lambda: float(os.getenv("MIN_SIMILARITY_SCORE", "0.3")))
+    abstention_reranker_threshold: float = field(default_factory=lambda: float(os.getenv("ABSTENTION_RERANKER_THRESHOLD", "0.0")))
+
 
 
 @dataclass(frozen=True)
@@ -93,7 +145,7 @@ class IngestionConfig:
     """
     allowed_source_roots: List[str] = field(
         default_factory=lambda: [
-            p.strip() for p in os.getenv("INGESTION_ALLOWED_ROOTS", "./data").split(",") if p.strip()
+            p.strip() for p in os.getenv("INGESTION_ALLOWED_ROOTS", "./data,./banking_rag/data").split(",") if p.strip()
         ]
     )
     enforce_allowlist: bool = field(default_factory=lambda: os.getenv("INGESTION_ENFORCE_ALLOWLIST", "true").lower() == "true")
@@ -142,7 +194,8 @@ class AppConfig:
         """Fail fast on configuration that would silently leave production data exposed."""
         is_dev = self.environment.lower() in ("development", "dev", "local", "test")
         if (
-            self.security.require_qdrant_auth_outside_dev
+            self.qdrant.mode == "server"
+            and self.security.require_qdrant_auth_outside_dev
             and not is_dev
             and not self.qdrant.api_key
             and not (self.qdrant.url and self.qdrant.url.startswith("https"))

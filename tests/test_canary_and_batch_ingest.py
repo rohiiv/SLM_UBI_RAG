@@ -66,6 +66,9 @@ def test_batched_offline_ingestion(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("INGESTION_ENFORCE_ALLOWLIST", "false")
     monkeypatch.setenv("INGESTION_BATCH_SIZE", "3")
     monkeypatch.setenv("QDRANT_UPSERT_BATCH_SIZE", "2")
+    # Use embedded Qdrant so this test runs without a Docker server
+    monkeypatch.setenv("VECTOR_DB_MODE", "embedded")
+    monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "qdrant_data"))
 
     jsonl_file = tmp_path / "batch_dataset.jsonl"
     records = [

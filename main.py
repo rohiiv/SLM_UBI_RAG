@@ -15,6 +15,13 @@ if str(project_root) not in sys.path:
 if str(project_root.parent) not in sys.path:
     sys.path.insert(0, str(project_root.parent))
 
+import os
+try:
+    import torch
+    torch.set_num_threads(min(4, os.cpu_count() or 4))
+except Exception:
+    pass
+
 from banking_rag.cache.retrieval_cache import RetrievalCacheManager
 from banking_rag.config import get_config
 from banking_rag.constants import BankingDomain, BankingRegulator

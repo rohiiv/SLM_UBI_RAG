@@ -6,6 +6,7 @@ Orchestrates: Document Loading -> Parsing -> Contextual Chunking -> Metadata Ext
 
 from pathlib import Path
 from typing import List, Union, Dict, Any, Optional
+import time
 
 from banking_rag.chunking.contextual_chunker import ContextualChunker
 from banking_rag.config import IngestionConfig, get_config
@@ -144,11 +145,13 @@ class OfflineIngestionPipeline:
                 if len(doc_batch) >= batch_size:
                     chunks_count = self._process_and_upsert_batch(doc_batch)
                     total_chunks += chunks_count
+                    print(f"📦 Ingested batch: {total_raw_docs} rows processed ({total_chunks} total chunks in Qdrant)...")
                     doc_batch.clear()
 
             if doc_batch:
                 chunks_count = self._process_and_upsert_batch(doc_batch)
                 total_chunks += chunks_count
+                print(f"📦 Final batch complete: {total_raw_docs} rows processed ({total_chunks} total chunks in Qdrant)...")
                 doc_batch.clear()
 
             if total_raw_docs == 0:
@@ -173,25 +176,38 @@ class OfflineIngestionPipeline:
         if not raw_docs:
             return 0
 
+        batch_start = time.perf_counter()
+
         # 1. Parsing & Cleaning
+        t0 = time.perf_counter()
         parsed_docs = [self.parser.parse(doc) for doc in raw_docs]
+        logger.debug(f"[Timing] Parsing:            {time.perf_counter() - t0:.2f}s ({len(raw_docs)} docs)")
 
         # 2. Metadata Extraction
+        t0 = time.perf_counter()
         for doc in parsed_docs:
             doc.metadata = self.metadata_extractor.extract_metadata(doc)
+        logger.debug(f"[Timing] Metadata Extraction: {time.perf_counter() - t0:.2f}s")
 
         # 3. Contextual Chunking
+        t0 = time.perf_counter()
         chunks = self.chunker.process_batch(parsed_docs)
+        logger.debug(f"[Timing] Chunking:            {time.perf_counter() - t0:.2f}s -> {len(chunks)} chunks")
         if not chunks:
             return 0
 
         # 4. Dense Embedding Generation
+        t0 = time.perf_counter()
         chunk_texts = [c.content for c in chunks]
         embeddings = self.embedding_generator.generate_embeddings(chunk_texts)
+        logger.info(f"[Timing] Embedding:           {time.perf_counter() - t0:.2f}s ({len(chunk_texts)} texts, device={getattr(getattr(self.embedding_generator, 'config', None), 'device', '?')})")
 
         # 5. Qdrant Storage Batch Upsert
+        t0 = time.perf_counter()
         self.vector_store.upsert_chunks(chunks=chunks, embeddings=embeddings)
+        logger.info(f"[Timing] Qdrant Upsert:       {time.perf_counter() - t0:.2f}s ({len(chunks)} chunks)")
 
+        logger.debug(f"[Timing] Batch total:         {time.perf_counter() - batch_start:.2f}s")
         return len(chunks)
 
     def ingest_directory(self, directory: Union[str, Path], recursive: bool = True) -> List[Dict[str, Any]]:

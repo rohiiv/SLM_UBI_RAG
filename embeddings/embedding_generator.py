@@ -2,13 +2,30 @@
 Banking RAG Embedding Generator module.
 
 Provides abstract interface and BGE-M3 embedding generator supporting dense vector generation.
+
+# ── MPS Cold-Cache Note ───────────────────────────────────────────────────────
+# PyTorch MPS compiles Apple Metal GPU shaders on FIRST USE for every unique
+# tensor operation graph. For BGE-M3 (~570M params, 24 transformer layers) this
+# compilation happens silently inside SentenceTransformer.__init__ and can take
+# 5-30 minutes on a cold cache (e.g. after a macOS update or on a new machine).
+# Subsequent runs read the pre-compiled shaders from:
+#   ~/Library/Caches/com.apple.metal/
+# and complete in ~10-15 seconds. PYTORCH_ENABLE_MPS_FALLBACK=1 is set below
+# so that any op without a Metal kernel silently falls back to CPU instead of
+# crashing, which also prevents compilation loops on edge-case ops.
+# ─────────────────────────────────────────────────────────────────────────────
 """
 
 import os
+import time
 import threading
 from abc import ABC, abstractmethod
 from typing import List, Union, Optional, Dict, Tuple, Any
 import numpy as np
+
+# Set before any torch/sentence_transformers import so MPS ops without a Metal
+# kernel fall back to CPU automatically instead of raising an error.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 from banking_rag.config import ModelConfig, get_config
 from banking_rag.constants import DEFAULT_DENSE_VECTOR_DIM
@@ -16,6 +33,18 @@ from banking_rag.exceptions import EmbeddingError
 from banking_rag.utils.logger import get_logger
 
 logger = get_logger("embeddings.embedding_generator")
+
+# ── Module-level import of SentenceTransformer ───────────────────────────────
+# Imported HERE (outside _load_model's threading lock) to avoid any interaction
+# with Python 3.13's import machinery while a threading.Lock is held.
+# The import is guarded so test environments without sentence-transformers installed
+# can still import this module without crashing.
+try:
+    from sentence_transformers import SentenceTransformer as _SentenceTransformer
+    _ST_AVAILABLE = True
+except ImportError:
+    _SentenceTransformer = None  # type: ignore[assignment,misc]
+    _ST_AVAILABLE = False
 
 
 class BaseEmbeddingGenerator(ABC):
@@ -78,14 +107,24 @@ class BGEEmbeddingGenerator(BaseEmbeddingGenerator):
         self._model = None
 
     def _load_model(self) -> None:
-        """Lazy loader for sentence_transformers / HuggingFace model, backed by a shared cache."""
+        """Lazy loader for the BGE-M3 SentenceTransformer model, backed by a shared process-wide cache.
+
+        MPS cold-cache note
+        -------------------
+        On first use on a new machine (or after a macOS update that invalidates the Metal shader
+        cache), PyTorch MPS must compile Apple Metal GPU shaders for every unique tensor operation
+        graph in BGE-M3. This compilation runs inside SentenceTransformer.__init__ without any
+        progress indicator and can legitimately take 5-30 minutes. Subsequent runs read the
+        pre-compiled shaders from ~/Library/Caches/com.apple.metal/ and complete in ~10-15s.
+        PYTORCH_ENABLE_MPS_FALLBACK=1 (set at module import) lets edge-case ops fall back to CPU.
+        """
         if self._model is not None:
             return
 
         cache_key = (self.model_name, self.device)
 
         with BGEEmbeddingGenerator._cache_lock:
-            # Another instance may have already loaded this exact model.
+            # Another thread may have finished loading while we waited for the lock.
             cached = BGEEmbeddingGenerator._model_cache.get(cache_key)
             if cached is not None:
                 self._model, self._dim = cached
@@ -100,30 +139,91 @@ class BGEEmbeddingGenerator(BaseEmbeddingGenerator):
                     f"to close the supply-chain risk of an upstream model update changing weights "
                     f"underneath you unnoticed."
                 )
-            logger.info(f"Loading embedding model '{self.model_name}' (revision={self.model_revision or 'UNPINNED'}) on device '{self.device}'...")
+
+            _load_start = time.perf_counter()
+
             try:
-                from sentence_transformers import SentenceTransformer
-                model = SentenceTransformer(
-                    self.model_name, device=self.device,
-                    revision=self.model_revision or None,
+                if not _ST_AVAILABLE:
+                    raise ImportError("sentence_transformers is not installed.")
+
+                # ── STEP 1: Resolve effective device ────────────────────────────────────────
+                effective_device = self.device
+                logger.info(
+                    f"[INIT STEP 1/5] Resolving device. Requested: '{effective_device}'. "
+                    f"PYTORCH_ENABLE_MPS_FALLBACK={os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK', 'unset')}"
                 )
 
-                # bge-m3 natively supports sequences up to 8192 tokens. Left uncapped, a batch
-                # gets padded to that full length, which on some backends (notably Apple MPS,
-                # which lacks an efficient attention kernel for very long sequences) tries to
-                # allocate a full-size attention buffer and fails ("Invalid buffer size").
-                # Our chunks are ~DEFAULT_CHUNK_SIZE words (see constants.py), so 1024 tokens
-                # comfortably covers chunk content plus contextual headers.
-                model.max_seq_length = int(os.getenv("EMBEDDING_MAX_SEQ_LENGTH", "1024"))
+                # ── STEP 2: Validate MPS availability ───────────────────────────────────────
+                if effective_device == "mps":
+                    try:
+                        import torch
+                        if not torch.backends.mps.is_available():
+                            logger.warning("[INIT STEP 2/5] MPS requested but not available. Falling back to CPU.")
+                            effective_device = "cpu"
+                        else:
+                            # Quick MPS sanity check — if this hangs, MPS Metal driver is broken.
+                            _t = time.perf_counter()
+                            _test = torch.zeros(1, device="mps")
+                            _ = (_test + 1).item()  # Force synchronous MPS dispatch
+                            del _test
+                            logger.info(f"[INIT STEP 2/5] MPS sanity check passed in {time.perf_counter()-_t:.3f}s.")
+                    except Exception as mps_err:
+                        logger.warning(f"[INIT STEP 2/5] MPS sanity check failed ({mps_err}). Falling back to CPU.")
+                        effective_device = "cpu"
+                else:
+                    logger.info(f"[INIT STEP 2/5] Device is '{effective_device}', skipping MPS check.")
 
-                dim = model.get_sentence_embedding_dimension() or DEFAULT_DENSE_VECTOR_DIM
-                logger.info(f"Successfully loaded embedding model. Dimension: {dim}")
+                # ── STEP 3: Construct SentenceTransformer ────────────────────────────────────
+                # NOTE: On first MPS use (cold Metal shader cache), this step can take 5-30
+                # minutes while Apple's Metal compiler builds GPU kernels for BGE-M3's
+                # attention layers. This is NORMAL. Subsequent runs complete in ~10-15s.
+                if effective_device == "mps":
+                    logger.info(
+                        "[INIT STEP 3/5] Constructing SentenceTransformer on MPS. "
+                        "If the Metal shader cache is COLD (first run / after macOS update), "
+                        "this step can take 5-30 minutes silently. This is expected behaviour — "
+                        "Apple's Metal compiler is building GPU kernels. Subsequent runs will be fast."
+                    )
+                else:
+                    logger.info(f"[INIT STEP 3/5] Constructing SentenceTransformer on device='{effective_device}'.")
+
+                _t = time.perf_counter()
+                model = _SentenceTransformer(
+                    self.model_name,
+                    device=effective_device,
+                    revision=self.model_revision or None,
+                )
+                logger.info(f"[INIT STEP 3/5] SentenceTransformer constructed in {time.perf_counter()-_t:.2f}s.")
+
+                # ── STEP 4: Cap sequence length ──────────────────────────────────────────────
+                # bge-m3 natively supports up to 8192 tokens. Left uncapped, a batch gets padded
+                # to that full length, which on MPS tries to allocate a full-size attention buffer
+                # and fails ("Invalid buffer size"). 512 tokens covers all our chunked content.
+                logger.info("[INIT STEP 4/5] Setting max_seq_length.")
+                _t = time.perf_counter()
+                model.max_seq_length = int(os.getenv("EMBEDDING_MAX_SEQ_LENGTH", "512"))
+                logger.info(f"[INIT STEP 4/5] max_seq_length={model.max_seq_length} set in {time.perf_counter()-_t:.4f}s.")
+
+                # ── STEP 5: Get embedding dimension ─────────────────────────────────────────
+                logger.info("[INIT STEP 5/5] Retrieving embedding dimension.")
+                _t = time.perf_counter()
+                # Use the new API name (ST 5.x) with graceful fallback for older versions.
+                if hasattr(model, "get_embedding_dimension"):
+                    dim = model.get_embedding_dimension() or DEFAULT_DENSE_VECTOR_DIM
+                else:
+                    dim = model.get_sentence_embedding_dimension() or DEFAULT_DENSE_VECTOR_DIM  # type: ignore[attr-defined]
+                logger.info(
+                    f"[INIT STEP 5/5] Embedding dimension: {dim} (retrieved in {time.perf_counter()-_t:.4f}s). "
+                    f"Total init time: {time.perf_counter()-_load_start:.2f}s. "
+                    f"Effective device: '{effective_device}'."
+                )
+
             except ImportError:
-                logger.warning("sentence_transformers not installed. Using fallback random vector generator for mock/testing.")
+                logger.warning("sentence_transformers not installed. Using mock random vector generator for testing.")
                 model = "MOCK"
                 dim = self._dim
             except Exception as e:
-                logger.error(f"Error loading embedding model {self.model_name}: {str(e)}")
+                logger.error(f"Error loading embedding model '{self.model_name}': {str(e)}")
                 raise EmbeddingError(f"Failed to load embedding model: {str(e)}")
 
             BGEEmbeddingGenerator._model_cache[cache_key] = (model, dim)
@@ -172,11 +272,11 @@ class BGEEmbeddingGenerator(BaseEmbeddingGenerator):
                 sub_batch_size = 512
                 for i in range(0, len(texts), sub_batch_size):
                     batch_texts = texts[i : i + sub_batch_size]
-                    batch_emb = self._model.encode(batch_texts, batch_size=32, show_progress_bar=False, normalize_embeddings=True)
+                    batch_emb = self._model.encode(batch_texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
                     all_embeddings.extend(batch_emb.tolist())
                 return all_embeddings
 
-            embeddings = self._model.encode(texts, batch_size=32, show_progress_bar=False, normalize_embeddings=True)
+            embeddings = self._model.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
             return embeddings.tolist()
 
         except Exception as e:
