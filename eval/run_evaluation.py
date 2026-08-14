@@ -181,75 +181,107 @@ def run_evaluation(
     logger.info("Instantiating OnlineRAGPipeline for evaluation...")
     pipeline = OnlineRAGPipeline()
 
-    detailed_results: List[Dict[str, Any]] = []
+    fieldnames = [
+        "question",
+        "domain",
+        "regulator",
+        "is_answerable",
+        "expected_source_doc",
+        "expected_source_chunk_id",
+        "retrieved_chunk_ids",
+        "retrieval_hit",
+        "retrieval_rank",
+        "reciprocal_rank",
+        "faithfulness_score",
+        "citations_dropped_count",
+        "abstained",
+        "abstention_correct",
+        "answer",
+    ]
+
+    detail_csv_path = output_dir / "results_detail.csv"
 
     # 2. Evaluate each test case
-    for idx, case in enumerate(cases, 1):
-        question = case.get("question", "").strip()
-        expected_doc = case.get("expected_source_doc")
-        expected_chunk_id = case.get("expected_source_chunk_id")
-        is_answerable = bool(case.get("is_answerable", True))
-        domain = case.get("domain", "Unknown")
-        regulator = case.get("regulator", "Unknown")
+    with open(detail_csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        f.flush()
 
-        logger.info(f"Evaluating case {idx}/{len(cases)} [{domain}]: '{question}'")
+        for idx, case in enumerate(cases, 1):
+            question = case.get("question", "").strip()
+            expected_doc = case.get("expected_source_doc")
+            expected_chunk_id = case.get("expected_source_chunk_id")
+            is_answerable = bool(case.get("is_answerable", True))
+            domain = case.get("domain", "Unknown")
+            regulator = case.get("regulator", "Unknown")
 
-        response = pipeline.query(query_text=question, top_k=top_k)
+            logger.info(f"Evaluating case {idx}/{len(cases)} [{domain}]: '{question}'")
 
-        # Extract retrieved chunk details
-        retrieved_chunks = response.retrieved_chunks or []
-        retrieved_chunk_ids = [
-            item.chunk.chunk_id or str(item.chunk.metadata.get("chunk_id", ""))
-            for item in retrieved_chunks
-        ]
+            response = pipeline.query(query_text=question, top_k=top_k)
 
-        # Compute retrieval_hit & retrieval_rank
-        retrieval_hit = None
-        retrieval_rank = None
-        reciprocal_rank = 0.0
+            # Extract retrieved chunk details
+            retrieved_chunks = response.retrieved_chunks or []
+            retrieved_chunk_ids = [
+                item.chunk.chunk_id or str(item.chunk.metadata.get("chunk_id", ""))
+                for item in retrieved_chunks
+            ]
 
-        if expected_chunk_id is not None and str(expected_chunk_id).strip():
-            exp_id_str = str(expected_chunk_id).strip()
-            retrieval_hit = False
-            for rank_idx, cid in enumerate(retrieved_chunk_ids, 1):
-                if cid == exp_id_str:
-                    retrieval_hit = True
-                    retrieval_rank = rank_idx
-                    reciprocal_rank = 1.0 / rank_idx
-                    break
+            # Compute retrieval_hit & retrieval_rank
+            retrieval_hit = None
+            retrieval_rank = None
+            reciprocal_rank = 0.0
 
-        # Faithfulness score
-        faithfulness_meta = response.metadata.get("faithfulness", {})
-        faithfulness_score = float(faithfulness_meta.get("faithfulness_score", 1.0))
+            if expected_chunk_id is not None and str(expected_chunk_id).strip():
+                exp_id_str = str(expected_chunk_id).strip()
+                retrieval_hit = False
+                for rank_idx, cid in enumerate(retrieved_chunk_ids, 1):
+                    if cid == exp_id_str:
+                        retrieval_hit = True
+                        retrieval_rank = rank_idx
+                        reciprocal_rank = 1.0 / rank_idx
+                        break
 
-        # Citations dropped count
-        dropped_citations = response.metadata.get("dropped_hallucinated_citations", [])
-        citations_dropped_count = len(dropped_citations)
+            # Faithfulness score
+            faithfulness_meta = response.metadata.get("faithfulness", {})
+            faithfulness_score = float(faithfulness_meta.get("faithfulness_score", 1.0))
 
-        # Abstention correctness
-        abstained = bool(response.metadata.get("abstained", False))
-        if not is_answerable:
-            abstention_correct = (abstained is True)
-        else:
-            abstention_correct = (abstained is False)
+            # Citations dropped count
+            dropped_citations = response.metadata.get("dropped_hallucinated_citations", [])
+            citations_dropped_count = len(dropped_citations)
 
-        detailed_results.append({
-            "question": question,
-            "domain": domain,
-            "regulator": regulator,
-            "is_answerable": is_answerable,
-            "expected_source_doc": expected_doc,
-            "expected_source_chunk_id": expected_chunk_id,
-            "retrieved_chunk_ids": retrieved_chunk_ids,
-            "retrieval_hit": retrieval_hit,
-            "retrieval_rank": retrieval_rank,
-            "reciprocal_rank": reciprocal_rank,
-            "faithfulness_score": faithfulness_score,
-            "citations_dropped_count": citations_dropped_count,
-            "abstained": abstained,
-            "abstention_correct": abstention_correct,
-            "answer": response.answer,
-        })
+            # Abstention correctness
+            abstained = bool(response.metadata.get("abstained", False))
+            if not is_answerable:
+                abstention_correct = (abstained is True)
+            else:
+                abstention_correct = (abstained is False)
+
+            row = {
+                "question": question,
+                "domain": domain,
+                "regulator": regulator,
+                "is_answerable": is_answerable,
+                "expected_source_doc": expected_doc,
+                "expected_source_chunk_id": expected_chunk_id,
+                "retrieved_chunk_ids": retrieved_chunk_ids,
+                "retrieval_hit": retrieval_hit,
+                "retrieval_rank": retrieval_rank,
+                "reciprocal_rank": reciprocal_rank,
+                "faithfulness_score": faithfulness_score,
+                "citations_dropped_count": citations_dropped_count,
+                "abstained": abstained,
+                "abstention_correct": abstention_correct,
+                "answer": response.answer,
+            }
+            detailed_results.append(row)
+
+            row_copy = dict(row)
+            if isinstance(row_copy.get("retrieved_chunk_ids"), list):
+                row_copy["retrieved_chunk_ids"] = "|".join(row_copy["retrieved_chunk_ids"])
+            writer.writerow(row_copy)
+            f.flush()
+
+    logger.info(f"Wrote evaluation detail CSV to {detail_csv_path}")
 
     # 3. Aggregate metrics overall and by domain
     overall_metrics = compute_aggregate_metrics(detailed_results)
@@ -274,38 +306,7 @@ def run_evaluation(
         json.dump(summary_payload, f, indent=2)
     logger.info(f"Wrote evaluation summary to {summary_json_path}")
 
-    # 5. Write detailed CSV
-    detail_csv_path = output_dir / "results_detail.csv"
-    fieldnames = [
-        "question",
-        "domain",
-        "regulator",
-        "is_answerable",
-        "expected_source_doc",
-        "expected_source_chunk_id",
-        "retrieved_chunk_ids",
-        "retrieval_hit",
-        "retrieval_rank",
-        "reciprocal_rank",
-        "faithfulness_score",
-        "citations_dropped_count",
-        "abstained",
-        "abstention_correct",
-        "answer",
-    ]
-
-    with open(detail_csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in detailed_results:
-            row_copy = dict(row)
-            if isinstance(row_copy.get("retrieved_chunk_ids"), list):
-                row_copy["retrieved_chunk_ids"] = "|".join(row_copy["retrieved_chunk_ids"])
-            writer.writerow(row_copy)
-
-    logger.info(f"Wrote evaluation detail CSV to {detail_csv_path}")
-
-    # 6. Print console summary table
+    # 5. Print console summary table
     print_summary_table(overall_metrics, by_domain_metrics)
 
 
