@@ -16,6 +16,7 @@ numpy>=1.24.0
 
 # Vector Database
 qdrant-client>=1.8.0
+faiss-cpu>=1.8.0
 
 # Fine-Tuned SLM & Transformers Inference
 transformers>=4.40.0

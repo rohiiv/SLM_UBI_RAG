@@ -22,6 +22,7 @@ from banking_rag.parser.parser import DocumentParser
 from banking_rag.utils.file_utils import find_documents, validate_file_exists
 from banking_rag.utils.logger import get_logger
 from banking_rag.vectorstore.qdrant_manager import QdrantVectorStoreManager
+from banking_rag.vectorstore import get_vector_store_manager
 
 logger = get_logger("pipeline.ingest")
 
@@ -111,7 +112,7 @@ class OfflineIngestionPipeline:
         self.chunker = chunker or ContextualChunker()
         self.metadata_extractor = metadata_extractor or MetadataExtractor()
         self.embedding_generator = embedding_generator or BGEEmbeddingGenerator()
-        self.vector_store = vector_store or QdrantVectorStoreManager()
+        self.vector_store = vector_store or get_vector_store_manager()
 
     def ingest_file(self, file_path: Union[str, Path]) -> Dict[str, Any]:
         """Ingests a single document file into Qdrant.
@@ -202,10 +203,10 @@ class OfflineIngestionPipeline:
         embeddings = self.embedding_generator.generate_embeddings(chunk_texts)
         logger.info(f"[Timing] Embedding:           {time.perf_counter() - t0:.2f}s ({len(chunk_texts)} texts, device={getattr(getattr(self.embedding_generator, 'config', None), 'device', '?')})")
 
-        # 5. Qdrant Storage Batch Upsert
+        # 5. Vector Store Batch Upsert
         t0 = time.perf_counter()
         self.vector_store.upsert_chunks(chunks=chunks, embeddings=embeddings)
-        logger.info(f"[Timing] Qdrant Upsert:       {time.perf_counter() - t0:.2f}s ({len(chunks)} chunks)")
+        logger.info(f"[Timing] Vector Store Upsert: {time.perf_counter() - t0:.2f}s ({len(chunks)} chunks)")
 
         logger.debug(f"[Timing] Batch total:         {time.perf_counter() - batch_start:.2f}s")
         return len(chunks)

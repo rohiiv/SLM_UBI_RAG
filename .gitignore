@@ -5,3 +5,6 @@ __pycache__/
 data/qdrant_data/
 logs/*.log
 .DS_Store
+data/parts/
+data/*.jsonl
+data/ingest_progress.json

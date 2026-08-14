@@ -13,6 +13,7 @@ from banking_rag.exceptions import RetrievalError
 from banking_rag.retrieval.filters import MetadataFilterBuilder
 from banking_rag.utils.logger import get_logger
 from banking_rag.vectorstore.qdrant_manager import QdrantVectorStoreManager, ScoredChunk
+from banking_rag.vectorstore import get_vector_store_manager
 
 logger = get_logger("retrieval.retriever")
 
@@ -57,7 +58,7 @@ class DenseRetriever(BaseRetriever):
             config: Retrieval settings.
         """
         self.embedding_generator = embedding_generator or BGEEmbeddingGenerator()
-        self.vector_store = vector_store or QdrantVectorStoreManager()
+        self.vector_store = vector_store or get_vector_store_manager()
         self.config = config or get_config().retrieval
         self.default_top_k = self.config.top_k_dense
 

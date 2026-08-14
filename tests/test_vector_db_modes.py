@@ -40,7 +40,7 @@ def test_qdrant_config_validation_errors(monkeypatch):
     monkeypatch.setenv("VECTOR_DB_MODE", "invalid_mode")
     with pytest.raises(ConfigurationError) as exc_info:
         QdrantConfig()
-    assert "VECTOR_DB_MODE must be either 'server' or 'embedded'." in str(exc_info.value)
+    assert "VECTOR_DB_MODE must be 'server', 'embedded', or 'faiss'." in str(exc_info.value)
 
     # Embedded mode missing path
     monkeypatch.setenv("VECTOR_DB_MODE", "embedded")

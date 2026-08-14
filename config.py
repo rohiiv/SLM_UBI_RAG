@@ -29,7 +29,14 @@ from banking_rag.constants import (
 
 @dataclass(frozen=True)
 class QdrantConfig:
-    """Qdrant Vector Database Connection Settings."""
+    """Qdrant Vector Database Connection Settings.
+
+    Supports three backend modes controlled by VECTOR_DB_MODE:
+      server   - Connect to a remote Qdrant server (requires QDRANT_HOST or QDRANT_URL).
+      embedded - Run Qdrant in-process on a local directory (requires QDRANT_PATH).
+      faiss    - Use a local FAISS IndexFlatIP index with a SQLite metadata sidecar
+                 (requires FAISS_INDEX_PATH; does NOT require any Qdrant settings).
+    """
     mode: str = field(default_factory=lambda: os.getenv("VECTOR_DB_MODE", "server").lower())
     path: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_PATH", "./qdrant_data"))
     host: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_HOST", "localhost") or None)
@@ -41,6 +48,8 @@ class QdrantConfig:
     collection_name: str = field(default_factory=lambda: os.getenv("QDRANT_COLLECTION") or os.getenv("QDRANT_COLLECTION_NAME") or DEFAULT_QDRANT_COLLECTION_NAME)
     vector_size: int = field(default_factory=lambda: int(os.getenv("QDRANT_VECTOR_SIZE", str(DEFAULT_DENSE_VECTOR_DIM))))
     timeout: float = field(default_factory=lambda: float(os.getenv("QDRANT_TIMEOUT", "60.0")))
+    # FAISS-mode only: directory where faiss.index and faiss_metadata.sqlite are stored.
+    faiss_index_path: str = field(default_factory=lambda: os.getenv("FAISS_INDEX_PATH", "./faiss_data"))
 
     @property
     def vector_db_mode(self) -> str:
@@ -65,14 +74,17 @@ class QdrantConfig:
     def __post_init__(self) -> None:
         from banking_rag.exceptions import ConfigurationError
         mode_val = (self.mode or "").lower()
-        if mode_val not in ("server", "embedded"):
-            raise ConfigurationError("VECTOR_DB_MODE must be either 'server' or 'embedded'.")
+        if mode_val not in ("server", "embedded", "faiss"):
+            raise ConfigurationError("VECTOR_DB_MODE must be 'server', 'embedded', or 'faiss'.")
         if mode_val == "embedded":
             if not self.path:
                 raise ConfigurationError("When VECTOR_DB_MODE=embedded, QDRANT_PATH is required.")
         elif mode_val == "server":
             if not self.host and not self.url:
                 raise ConfigurationError("When VECTOR_DB_MODE=server, QDRANT_HOST is required.")
+        elif mode_val == "faiss":
+            if not self.faiss_index_path:
+                raise ConfigurationError("When VECTOR_DB_MODE=faiss, FAISS_INDEX_PATH is required.")
 
 
 
