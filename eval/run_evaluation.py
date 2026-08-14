@@ -17,6 +17,13 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+# Ensure banking_rag package is importable when executed directly
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+if str(project_root.parent) not in sys.path:
+    sys.path.insert(0, str(project_root.parent))
+
 from banking_rag.pipeline.rag_pipeline import OnlineRAGPipeline
 from banking_rag.utils.logger import get_logger
 
