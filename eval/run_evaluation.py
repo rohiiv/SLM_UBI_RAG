@@ -8,15 +8,78 @@ and outputs results_summary.json and results_detail.csv.
 
 import argparse
 import csv
+import gc
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import torch
 
 from banking_rag.pipeline.rag_pipeline import OnlineRAGPipeline
 from banking_rag.utils.logger import get_logger
 
 logger = get_logger("eval.run_evaluation")
+
+
+def _parse_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Parses a CSV row dictionary back into a typed result dictionary for aggregate metric computation."""
+    def _parse_bool(val: Any) -> bool:
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("true", "1")
+
+    def _parse_optional_bool(val: Any) -> Optional[bool]:
+        if val is None or str(val).strip() == "" or str(val).strip().lower() in ("none", "null"):
+            return None
+        return _parse_bool(val)
+
+    def _parse_optional_int(val: Any) -> Optional[int]:
+        if val is None or str(val).strip() == "" or str(val).strip().lower() in ("none", "null"):
+            return None
+        try:
+            return int(float(val))
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_float(val: Any, default: float = 0.0) -> float:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+
+    def _parse_int(val: Any, default: int = 0) -> int:
+        try:
+            return int(float(val))
+        except (ValueError, TypeError):
+            return default
+
+    retrieved_raw = row.get("retrieved_chunk_ids", "")
+    if isinstance(retrieved_raw, list):
+        retrieved_chunk_ids = retrieved_raw
+    elif retrieved_raw and isinstance(retrieved_raw, str):
+        retrieved_chunk_ids = [cid.strip() for cid in retrieved_raw.split("|") if cid.strip()]
+    else:
+        retrieved_chunk_ids = []
+
+    return {
+        "question": row.get("question", "").strip(),
+        "domain": row.get("domain", "Unknown"),
+        "regulator": row.get("regulator", "Unknown"),
+        "is_answerable": _parse_bool(row.get("is_answerable", True)),
+        "expected_source_doc": row.get("expected_source_doc"),
+        "expected_source_chunk_id": row.get("expected_source_chunk_id"),
+        "retrieved_chunk_ids": retrieved_chunk_ids,
+        "retrieval_hit": _parse_optional_bool(row.get("retrieval_hit")),
+        "retrieval_rank": _parse_optional_int(row.get("retrieval_rank")),
+        "reciprocal_rank": _parse_float(row.get("reciprocal_rank"), 0.0),
+        "faithfulness_score": _parse_float(row.get("faithfulness_score"), 1.0),
+        "citations_dropped_count": _parse_int(row.get("citations_dropped_count"), 0),
+        "abstained": _parse_bool(row.get("abstained", False)),
+        "abstention_correct": _parse_bool(row.get("abstention_correct", False)),
+        "answer": row.get("answer", ""),
+    }
 
 
 def load_golden_set(file_path: Path) -> List[Dict[str, Any]]:
@@ -201,14 +264,41 @@ def run_evaluation(
 
     detail_csv_path = output_dir / "results_detail.csv"
 
-    # 2. Evaluate each test case
-    with open(detail_csv_path, "w", newline="", encoding="utf-8") as f:
+    # Resume support: check if results_detail.csv exists and has rows
+    completed_questions = set()
+    detailed_results: List[Dict[str, Any]] = []
+
+    if detail_csv_path.exists() and detail_csv_path.stat().st_size > 0:
+        with open(detail_csv_path, "r", encoding="utf-8") as f_in:
+            reader = csv.DictReader(f_in)
+            for row in reader:
+                q = row.get("question", "").strip()
+                if q:
+                    completed_questions.add(q)
+                    detailed_results.append(_parse_csv_row(row))
+
+    file_mode = "a" if completed_questions else "w"
+    skipped_count = sum(1 for c in cases if c.get("question", "").strip() in completed_questions)
+
+    if skipped_count > 0:
+        logger.info(
+            f"Found existing {detail_csv_path} with {len(completed_questions)} completed case(s). "
+            f"Skipping {skipped_count} case(s) already evaluated."
+        )
+
+    # 2. Evaluate each test case and write results incrementally
+    with open(detail_csv_path, file_mode, newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        f.flush()
+        if file_mode == "w":
+            writer.writeheader()
+            f.flush()
+            os.fsync(f.fileno())
 
         for idx, case in enumerate(cases, 1):
             question = case.get("question", "").strip()
+            if question in completed_questions:
+                continue
+
             expected_doc = case.get("expected_source_doc")
             expected_chunk_id = case.get("expected_source_chunk_id")
             is_answerable = bool(case.get("is_answerable", True))
@@ -280,6 +370,22 @@ def run_evaluation(
                 row_copy["retrieved_chunk_ids"] = "|".join(row_copy["retrieved_chunk_ids"])
             writer.writerow(row_copy)
             f.flush()
+            os.fsync(f.fileno())
+
+            # Memory management: per-iteration cleanup
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Deeper periodic cleanup & logging every 20 iterations
+            if idx % 20 == 0 and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                alloc_gb = torch.cuda.memory_allocated() / (1024 ** 3)
+                res_gb = torch.cuda.memory_reserved() / (1024 ** 3)
+                logger.info(
+                    f"GPU Memory at iteration {idx}/{len(cases)}: "
+                    f"Allocated = {alloc_gb:.2f} GB, Reserved = {res_gb:.2f} GB"
+                )
 
     logger.info(f"Wrote evaluation detail CSV to {detail_csv_path}")
 
