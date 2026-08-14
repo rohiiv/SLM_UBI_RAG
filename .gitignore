@@ -2,4 +2,6 @@
 __pycache__/
 *.pyc
 
-data/
+data/qdrant_data/
+logs/*.log
+.DS_Store
