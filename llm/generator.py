@@ -4,10 +4,13 @@ Banking RAG Fine-tuned Qwen SLM Generator module.
 Implements BaseLLMGenerator interface for text generation using Qwen fine-tuned Banking SLM.
 """
 
+import os
 import re
 import threading
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Tuple
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from banking_rag.config import ModelConfig, get_config
 from banking_rag.constants import CANARY_TOKEN_PREFIX
@@ -189,6 +192,11 @@ class QwenBankingSLMGenerator(BaseLLMGenerator):
             input_length = inputs["input_ids"].shape[1]
             generated_tokens = outputs[0][input_length:]
             response_text = self._tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+
+            del inputs
+            del outputs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             response_text = self._check_and_redact_canary_tokens(response_text, canary_token=canary_token, system_prompt=system_prompt)
 

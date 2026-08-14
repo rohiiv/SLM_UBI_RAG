@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # Ensure banking_rag package is importable when executed directly
 project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
@@ -24,7 +26,7 @@ if str(project_root) not in sys.path:
 if str(project_root.parent) not in sys.path:
     sys.path.insert(0, str(project_root.parent))
 
-from banking_rag.pipeline.rag_pipeline import OnlineRAGPipeline
+from banking_rag.pipeline.rag_pipeline import OnlineRAGPipeline, RAGResponse
 from banking_rag.utils.logger import get_logger
 
 logger = get_logger("eval.run_evaluation")
@@ -314,7 +316,31 @@ def run_evaluation(
 
             logger.info(f"Evaluating case {idx}/{len(cases)} [{domain}]: '{question}'")
 
-            response = pipeline.query(query_text=question, top_k=top_k)
+            try:
+                response = pipeline.query(query_text=question, top_k=top_k)
+            except Exception as e:
+                logger.warning(f"Query attempt 1 failed for case {idx} [{domain}] '{question}': {e}. Clearing cache and retrying...")
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                try:
+                    response = pipeline.query(query_text=question, top_k=top_k)
+                except Exception as e2:
+                    logger.error(f"Query attempt 2 failed for case {idx} [{domain}] '{question}': {e2}. Recording error fallback row.")
+                    response = RAGResponse(
+                        query=question,
+                        answer=f"ERROR: Execution failure: {str(e2)}",
+                        citations=[],
+                        retrieved_chunks=[],
+                        cached=False,
+                        metadata={
+                            "abstained": True,
+                            "abstention_reason": "query_execution_error",
+                            "error": str(e2),
+                            "faithfulness": {"faithfulness_score": 0.0},
+                            "dropped_hallucinated_citations": [],
+                        },
+                    )
 
             # Extract retrieved chunk details
             retrieved_chunks = response.retrieved_chunks or []
